@@ -163,17 +163,43 @@ Likely issue: {stuck_on}"""
 
     return summary
 
-# def save_session_entry(game_name: str, entry: dict):
-#     # 1. Create data/sessions directory if it doesn't exist
-#     # 2. Build the file path
-#     # 3. Format entry as pipe-separated line
-#     # 4. Append to file
-#     pass
+def save_session_entry(game_name: str, entry: dict):
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    file_path = f"{SESSION_DIR}/{game_name}.txt"
+    
+    line = "|".join([
+        entry.get("character", ""),
+        entry.get("game_stage", ""),
+        entry.get("current_area", ""),
+        entry.get("confidence", ""),
+        entry.get("goal", "")
+    ])
+    
+    with open(file_path, "a") as f:
+        f.write(line + "\n")
 
-
-# def load_session_history(game_name: str) -> list:
-#     # 1. Build file path
-#     # 2. If file doesn't exist return empty list
-#     # 3. Read lines, parse each back into a dict
-#     # 4. Return last 3 entries
-#     pass
+def load_session_history(game_name: str) -> list:
+    file_path = f"{SESSION_DIR}/{game_name}.txt"
+    
+    if not os.path.exists(file_path):
+        return []
+    
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    
+    history = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) == 5:
+            history.append({
+                "character": parts[0],
+                "game_stage": parts[1],
+                "current_area": parts[2],
+                "confidence": parts[3],
+                "goal": parts[4]
+            })
+    
+    return history[-3:]
