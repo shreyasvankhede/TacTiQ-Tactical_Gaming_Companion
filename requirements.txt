@@ -1,0 +1,6 @@
+mss
+keyboard
+Pillow
+psutil
+google-generativeai
+python-dotenvpip install python-dotenv google-generativeai
