@@ -6,10 +6,12 @@ load_dotenv()
 
 youtube=build("youtube","v3",developerKey=os.getenv("YOUTUBE_API_KEY"))
 
-def search_tutorials(keywords:list,game_name:str)->list:
-    primary=keywords[0] if keywords else game_name
-    query=f"{primary} guide tutorial"
-    
+def search_tutorials(keywords:str,game_name:str)->list:
+    if len(keywords)!=0:
+        primary=keywords
+    else:
+        primary=game_name + " guide tutorial"
+    query= primary 
     print(f"Searching YouTube for: {query}")
 
     request=youtube.search().list(

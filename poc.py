@@ -14,7 +14,7 @@ def capture_screenshot():
     with mss.mss() as sct:
         raw = sct.grab(sct.monitors[1])
         img = Image.frombytes("RGB", raw.size, raw.rgb)
-        img.save(filename)
+        img.save(f"data/screenshots/{filename}")
     print(f"Screenshot saved: {filename}")
     return img, filename
 
@@ -26,11 +26,12 @@ def process():
         img, filename = capture_screenshot()
 
         analysis = analyze_screenshot(img, game)
+        print("Raw youtube_search field:", analysis.get("youtube_search"))
         summary = summarize_analysis(analysis)
         print(f"\n--- Tactiq Analysis ---")
         print(summary)
 
-        videos=search_tutorials(analysis.get("search_keywords",[]),game)
+        videos=search_tutorials(analysis.get("youtube_search",[]),game)
         print("\n--- Tutorial Videos ---")
         for i, v in enumerate(videos, 1):
             print(f"{i}. {v['title']}")

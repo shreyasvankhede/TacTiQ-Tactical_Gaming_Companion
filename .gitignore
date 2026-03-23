@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Session data
+.txt
+*.txt
+
 # C extensions
 *.so
 # Screenshots

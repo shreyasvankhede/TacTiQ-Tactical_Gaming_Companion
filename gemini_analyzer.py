@@ -6,20 +6,19 @@ from dotenv import load_dotenv
 import io
 import re
 import os
+import time
 
 SESSION_DIR = "data/sessions"
 
 load_dotenv()
 
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-# Store everything
-session_history = []
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY2"))
 
 
 
-def update_session_context(analysis: dict):
+
+def update_session_context(game_name:str,analysis: dict):
     entry = {
         "character": analysis.get("character", "").split(",")[0],
         "game_stage": analysis.get("progression", {}).get("game_stage"),
@@ -27,23 +26,26 @@ def update_session_context(analysis: dict):
         "confidence": analysis.get("progression", {}).get("confidence"),
        "goal": analysis.get("player_intent", ["Unknown"])[0]
     }
-    session_history.append(entry)
+    save_session_entry(game_name,entry)
+    print(f"Saved entry for: {analysis.get('game_name')}")
 
-def build_context_hint() -> str:
-    if not session_history:
-        return ""
+def build_context_hint(game_name: str) -> str:
+    history = load_session_history(game_name)  # always load from file
     
-    recent = session_history[-3:]
+    if not history:
+        return ""  # no history yet
+    
+    recent = history[-3:]
     history_text = "\n".join([
-        f"- {e['character']} | {e['game_stage']} | {e['current_area']} (confidence: {e['confidence']} |{e['goal']})"
+        f"- {e['character']} | {e['game_stage']} | {e['current_area']} (confidence: {e['confidence']} | {e['goal']})"
         for e in recent
     ])
     
     return f"""
-Previous analyses this session:
-{history_text}
-If current screenshot shows an earlier location, player is likely revisiting it.
-"""
+        Previous analyses this session:
+        {history_text}
+        If current screenshot shows an earlier location, player is likely revisiting it.
+        """
 
 def clean_gemini_response(text: str) -> str:
     # Remove markdown code blocks regardless of format
@@ -52,17 +54,32 @@ def clean_gemini_response(text: str) -> str:
     return text.strip()
 
 def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
-    context_hint = build_context_hint()
+    context_hint = build_context_hint(game_name)
+    print(f"Context hint being sent:\n{context_hint}")
     prompt =f"""
     <role>
-    You are an expert on {game_name} with complete knowledge of its story, characters, locations, missions, and progression. Do NOT just describe what you visually see — use your knowledge to identify exactly what is happening.
+    You are an expert on {game_name} with complete knowledge of its story, characters, locations, missions, and progression.
+    Do NOT just describe what you visually see — use your knowledge to identify exactly what is happening.
     </role>
 
     <context>
-    Game: {game_name}
-    {context_hint}
-    </context>
+        Game: {game_name}
+        {context_hint}
 
+        CRITICAL INSTRUCTION: If previous analyses show a later game stage than what 
+        you might visually guess, you MUST trust the session history over visual cues.
+        Visual cues like outfits and locations can be misleading when a player revisits 
+        earlier areas. The session history is ground truth — if it shows a later stage, 
+        the player is at that stage or beyond, never earlier.
+
+        If the player is in an area associated with an earlier game stage than their 
+        current progression, use your complete knowledge of {game_name} to reason about 
+        WHY they might be revisiting it. Consider what that specific area offers in terms 
+        of collectibles, side content, challenges, secrets, or resources that would 
+        motivate a player at their current progression to return there.
+        Use minimap waypoints, equipped items, and your knowledge of {game_name} to 
+        determine the most likely revisit reason and reflect this in player_intent.
+    </context>
     <instructions>
     Analyze the following carefully:
     - Character identity: cross-reference appearance against ALL characters in {game_name} — do not default to the main protagonist
@@ -72,20 +89,31 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     - Minimap markers: waypoints, custom markers, path lines and what they suggest the player is navigating toward
     - Player intent: most likely reason this player is in this area based on location, waypoint direction, equipped items, and game knowledge
     - Environmental mismatch: is the player's outfit or equipment appropriate for this environment
-    - Cross-reference your character and stage guess against ALL visible HUD elements — health/stamina core sizes, money amount, dead eye level. If HUD state contradicts your guess, revise it
+    - Cross-reference your character and stage guess against ALL visible HUD elements —
+      . If HUD state contradicts your guess, revise it
     </instructions>
 
     <search_query_rules>
-    Generate exactly ONE youtube_search query as a plain string using this priority:
-    1. If active mission visible on screen → "{game_name} [exact mission name] guide"
-    2. If known location + free roam → "{game_name} [location name] tips secrets"
-    3. If boss fight detected → "{game_name} [boss name] strategy guide"
-    4. If only game stage known → "{game_name} [game stage] walkthrough"
+    You MUST follow these rules strictly when generating youtube_search.
+    This field is the MOST IMPORTANT field in the output.
 
-    Good example: "Red Dead Redemption 2 Grizzlies White Arabian location guide"
-    Bad example: "Red Dead Redemption 2 guide"
+    RULE 1: Never generate a generic query like "{game_name} guide" or "{game_name} tutorial". This is strictly forbidden.
+    RULE 2: Always use the most specific information available from the screenshot.
+    RULE 3: Follow this priority strictly:
+    - Active mission name visible → "{game_name} [mission name] guide"
+    - Combat/boss fight → "{game_name} [enemy/boss name] fight strategy"
+    - Known location + free roam → "{game_name} [specific location] tips secrets"
+    - Game stage only → "{game_name} [chapter/stage] walkthrough guide"
 
-    Never invent mission or location names you cannot explicitly read on screen.
+    Current screenshot context:
+    - If you identified a location → use it
+    - If you identified hostile NPCs → use them
+    - If you identified a mission → use it
+
+    CORRECT: "Red Dead Redemption 2 Rhodes combat mission guide"
+    WRONG: "Red Dead Redemption 2 guide tutorial"
+
+    Never invent names you cannot see on screen.
     </search_query_rules>
 
     <output_format>
@@ -107,7 +135,7 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     "situation": "one sentence describing what is currently happening",
     "likely_stuck_on": "one sentence describing the most likely struggle",
     "contextual_warning": "immediate threat or issue player may not have noticed — null if nothing noteworthy",
-    "youtube_search": "single optimized search query string"
+    "youtube_search": "specific query using location/mission/enemy from screenshot — NEVER generic"
     }}
     </output_format>
 
@@ -122,14 +150,14 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     
     # rest of your code
     response = client.models.generate_content(
-    model="gemini-2.5-flash",
+    model="gemini-3.1-flash-lite-preview",
     contents=[prompt, img_clean]
 )
     
     try:
         cleaned = clean_gemini_response(response.text)
         result = json.loads(cleaned)
-        update_session_context(result)  # save to session history
+        update_session_context(game_name,result)  # save to session history
         return result
     except json.JSONDecodeError:
         print("Gemini returned invalid JSON, raw response:")
@@ -139,8 +167,15 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
             "current_area": "Unknown",
             "situation": "Analysis failed",
             "likely_stuck_on": "Unknown",
-            "youtube_search": f"{game_name} guide"  # fix this too — was search_keywords
+            "youtube_search": f"{game_name} guide"  
         }
+    except Exception as e:
+            if "429" in str(e):
+                wait = 30 *  1  # 30s, 60s, 90s
+                print(f"Rate limited. Waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                raise e
 def summarize_analysis(analysis: dict) -> str:
     area = analysis.get("current_area", "Unknown location")
     character = analysis.get("character", "Unknown").split(".")[0]
@@ -152,6 +187,8 @@ def summarize_analysis(analysis: dict) -> str:
     current_mission = progression.get("current_mission", "Unknown")
     next_obj = progression.get("next_objective", "Unknown")
     confidence = progression.get("confidence", "low")
+
+
 
     summary = f"""Location: {area}
 Character: {character}
@@ -203,3 +240,4 @@ def load_session_history(game_name: str) -> list:
             })
     
     return history[-3:]
+
