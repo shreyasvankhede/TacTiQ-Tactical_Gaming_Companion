@@ -6,11 +6,13 @@ from datetime import datetime
 from game_detector import detect_running_game
 from gemini_analyzer import analyze_screenshot, summarize_analysis
 from youtube_search import search_tutorials
+import os
+DATA_DIR="data/screenshots"
 
-
-def capture_screenshot():
+def capture_screenshot(game_name):
+    os.makedirs(f"{DATA_DIR}/{game_name}", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"screenshot_{timestamp}.png"
+    filename = f"{DATA_DIR}/{game_name}/screenshot_{timestamp}.png"
     with mss.mss() as sct:
         raw = sct.grab(sct.monitors[1])
         img = Image.frombytes("RGB", raw.size, raw.rgb)

@@ -18,34 +18,35 @@ client = genai.Client(api_key=os.getenv("GEMINI_API_KEY2"))
 
 
 
-def update_session_context(game_name:str,analysis: dict):
+def update_session_context(game_name: str, analysis: dict):
     entry = {
         "character": analysis.get("character", "").split(",")[0],
         "game_stage": analysis.get("progression", {}).get("game_stage"),
         "current_area": analysis.get("current_area"),
-        "confidence": analysis.get("progression", {}).get("confidence"),
-       "goal": analysis.get("player_intent", ["Unknown"])[0]
+        "goal": analysis.get("player_intent", ["Unknown"])[0],
+        "build": analysis.get("player_attributes")
     }
-    save_session_entry(game_name,entry)
-    print(f"Saved entry for: {analysis.get('game_name')}")
+    save_session_entry(game_name, entry)
 
 def build_context_hint(game_name: str) -> str:
-    history = load_session_history(game_name)  # always load from file
+    state = load_session_history(game_name)
     
-    if not history:
-        return ""  # no history yet
+    if not state:
+        return "[First Analysis of Session: No prior context available.]"
     
-    recent = history[-3:]
-    history_text = "\n".join([
-        f"- {e['character']} | {e['game_stage']} | {e['current_area']} (confidence: {e['confidence']} | {e['goal']})"
-        for e in recent
-    ])
+    goals_str = ", ".join(state["recent_goals"])
     
     return f"""
-        Previous analyses this session:
-        {history_text}
-        If current screenshot shows an earlier location, player is likely revisiting it.
-        """
+    [PERSISTENT SESSION MEMORY]
+    - Confirmed Character: {state['character']}
+    - Highest Game Stage Reached: {state['max_game_stage']}
+    - Last Known Location: {state['last_area']}
+    - Identified Player Build: {state['current_build']}
+    - Recent Objectives: {goals_str}
+    
+    CRITICAL: If visual cues suggest an earlier game stage, the player is likely 
+    revisiting {state['last_area']} for side content or collectibles.
+    """
 
 def clean_gemini_response(text: str) -> str:
     # Remove markdown code blocks regardless of format
@@ -134,6 +135,7 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     }},
     "situation": "one sentence describing what is currently happening",
     "likely_stuck_on": "one sentence describing the most likely struggle",
+    "player_attributes": "player build type, playstyle, or class if applicable to {game_name} — null if not relevant for {game_name}",
     "contextual_warning": "immediate threat or issue player may not have noticed — null if nothing noteworthy",
     "youtube_search": "specific query using location/mission/enemy from screenshot — NEVER generic"
     }}
@@ -150,7 +152,7 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     
     # rest of your code
     response = client.models.generate_content(
-    model="gemini-3.1-flash-lite-preview",
+    model="gemini-3-flash-preview",
     contents=[prompt, img_clean]
 )
     
@@ -181,7 +183,7 @@ def summarize_analysis(analysis: dict) -> str:
     character = analysis.get("character", "Unknown").split(".")[0]
     situation = analysis.get("situation", "").split(".")[0]
     stuck_on = analysis.get("likely_stuck_on", "").split(".")[0]
-    
+    build=str(analysis.get("player_attributes", "")).split(".")[0]
     progression = analysis.get("progression", {})
     stage = progression.get("game_stage", "Unknown")
     current_mission = progression.get("current_mission", "Unknown")
@@ -196,48 +198,50 @@ Stage: {stage}
 Mission: {current_mission} (confidence: {confidence})
 Next: {next_obj}
 Situation: {situation}
+player_build:{build}
 Likely issue: {stuck_on}"""
 
     return summary
 
 def save_session_entry(game_name: str, entry: dict):
     os.makedirs(SESSION_DIR, exist_ok=True)
-    file_path = f"{SESSION_DIR}/{game_name}.txt"
+    file_path = f"{SESSION_DIR}/{game_name}_state.json"
     
-    line = "|".join([
-        entry.get("character", ""),
-        entry.get("game_stage", ""),
-        entry.get("current_area", ""),
-        entry.get("confidence", ""),
-        entry.get("goal", "")
-    ])
-    
-    with open(file_path, "a") as f:
-        f.write(line + "\n")
+    state = {
+        "character": "Unknown",
+        "max_game_stage": "Early Game",
+        "last_area": "Unknown",
+        "current_build": "Unknown",
+        "recent_goals": []
+    }
 
-def load_session_history(game_name: str) -> list:
-    file_path = f"{SESSION_DIR}/{game_name}.txt"
+    # Load existing state if it exists
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            state = json.load(f)
+
+    # Update state with new info
+    state["character"] = entry.get("character", state["character"])
+    state["last_area"] = entry.get("current_area", state["last_area"])
+    state["current_build"] = entry.get("build", state["current_build"])
     
+    # Simple logic to keep the "highest" stage (optional refinement)
+    state["max_game_stage"] = entry.get("game_stage", state["max_game_stage"])
+
+    # Maintain a small list of the last 3 goals
+    new_goal = entry.get("goal", "Unknown")
+    if new_goal not in state["recent_goals"]:
+        state["recent_goals"].insert(0, new_goal)
+        state["recent_goals"] = state["recent_goals"][:3]
+
+    with open(file_path, "w") as f:
+        json.dump(state, f, indent=4)
+
+def load_session_history(game_name: str) -> dict:
+    file_path = f"{SESSION_DIR}/{game_name}_state.json"
     if not os.path.exists(file_path):
-        return []
+        return None
     
     with open(file_path, "r") as f:
-        lines = f.readlines()
-    
-    history = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("|")
-        if len(parts) == 5:
-            history.append({
-                "character": parts[0],
-                "game_stage": parts[1],
-                "current_area": parts[2],
-                "confidence": parts[3],
-                "goal": parts[4]
-            })
-    
-    return history[-3:]
+        return json.load(f)
 

@@ -10,7 +10,7 @@ KNOWN_GAMES = {
     "DOOM.exe": "DOOM Eternal",
     "valheim.exe": "Valheim",
     "RDR2.exe": "Red Dead Redemption 2",
-    "brave.exe": "Red Dead Redemption 2",
+    "brave.exe": "Elden Ring",
 }
 
 def detect_running_game():
