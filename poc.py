@@ -10,22 +10,32 @@ import os
 DATA_DIR="data/screenshots"
 
 def capture_screenshot(game_name):
-    os.makedirs(f"{DATA_DIR}/{game_name}", exist_ok=True)
+    # 1. Define the specific folder for this game
+    game_dir = os.path.join(DATA_DIR, game_name)
+    os.makedirs(game_dir, exist_ok=True)
+    
+    # 2. Define ONLY the filename (not the full path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{DATA_DIR}/{game_name}/screenshot_{timestamp}.png"
+    file_name = f"screenshot_{timestamp}.png"
+    
+    # 3. Combine them for the full save path
+    full_path = os.path.join(game_dir, file_name)
+    
     with mss.mss() as sct:
+        # Capture from the primary monitor
         raw = sct.grab(sct.monitors[1])
         img = Image.frombytes("RGB", raw.size, raw.rgb)
-        img.save(f"data/screenshots/{filename}")
-    print(f"Screenshot saved: {filename}")
-    return img, filename
+        img.save(full_path) # Use the clean full path here
+        
+    print(f"Screenshot saved: {full_path}")
+    return img, full_path
 
 def process():
     try:
         game = detect_running_game()
         print(f"Game detected: {game}")
 
-        img, filename = capture_screenshot()
+        img, filename = capture_screenshot(game)
 
         analysis = analyze_screenshot(img, game)
         print("Raw youtube_search field:", analysis.get("youtube_search"))

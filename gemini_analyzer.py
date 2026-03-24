@@ -137,7 +137,8 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     "likely_stuck_on": "one sentence describing the most likely struggle",
     "player_attributes": "player build type, playstyle, or class if applicable to {game_name} — null if not relevant for {game_name}",
     "contextual_warning": "immediate threat or issue player may not have noticed — null if nothing noteworthy",
-    "youtube_search": "specific query using location/mission/enemy from screenshot — NEVER generic"
+    "youtube_search": "specific query using location/mission/enemy from screenshot — NEVER generic",
+    "tips": "3 concise, pro-level tips for this specific {game_name} area, boss, or mechanic seen on screen. Focus on secrets, weaknesses, or efficient strategies."
     }}
     </output_format>
 
@@ -189,18 +190,29 @@ def summarize_analysis(analysis: dict) -> str:
     current_mission = progression.get("current_mission", "Unknown")
     next_obj = progression.get("next_objective", "Unknown")
     confidence = progression.get("confidence", "low")
+    tips_data = analysis.get("tips", [])
 
+    # 2. Check if it's a list; if so, join with newlines and bullets
+    if isinstance(tips_data, list):
+        tips = "\n".join([f"• {tip}" for tip in tips_data])
+    else:
+        # Fallback if it's already a string
+        tips = f"• {tips_data}"
 
+    summary = f"""--- Analysis Report ---
+    Location: {area}
+    Character: {character}
+    Stage: {stage}
+    Mission: {current_mission} (Confidence: {confidence})
+    Next: {next_obj}
+    Build: {build}
 
-    summary = f"""Location: {area}
-Character: {character}
-Stage: {stage}
-Mission: {current_mission} (confidence: {confidence})
-Next: {next_obj}
-Situation: {situation}
-player_build:{build}
-Likely issue: {stuck_on}"""
+    Situation: {situation}
+    Likely Issue: {stuck_on}
 
+    💡 PRO TIPS:
+    {tips}
+----------------------"""
     return summary
 
 def save_session_entry(game_name: str, entry: dict):
