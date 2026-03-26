@@ -3,7 +3,7 @@
 
 TacTiQ is a seamless, real-time gaming overlay that acts as your personal AI co-pilot. Powered by the **Google Gemini Vision API**, it captures your live gameplay, analyzes your current situation (locations, bosses, builds), and provides instant tactical advice and context-aware YouTube guides — all without breaking your game's immersion.
 
-> ⚠️ Replace the image below with your actual screenshot  
+
 
 Input image:
 <img width="1920" height="1080" alt="Screenshot 2026-03-26 203304" src="https://github.com/user-attachments/assets/dd4b2d5b-7669-4573-ad45-245d5790c1d6" />
