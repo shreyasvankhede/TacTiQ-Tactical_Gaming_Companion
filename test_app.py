@@ -1,25 +1,31 @@
 import sys
 import os
+import ctypes
+import random
 from datetime import datetime
 import keyboard
 import mss
 from PIL import Image
+import concurrent.futures # <-- NEW: For simultaneous API calls
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QScrollArea, QFrame, QLabel, QPushButton)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QPoint, QUrl
+                             QScrollArea, QFrame, QLabel, QPushButton, QLineEdit)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject, QUrl
 from PyQt6.QtGui import QColor, QPainter
 
 # --- CRITICAL: OPENGL & WEB ENGINE ---
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEngineSettings, QWebEnginePage
+from PyQt6.QtWebEngineCore import QWebEngineSettings
 
 from game_detector import detect_running_game
-from gemini_analyzer import analyze_screenshot, summarize_analysis
+from gemini_analyzer import analyze_screenshot, summarize_analysis, chat_with_tactiq, generate_chat_greeting
 from youtube_search import search_tutorials
 
 DATA_DIR = "data/screenshots"
 
+# ==========================================
+# 1. CAPTURE LOGIC & UTILS
+# ==========================================
 def capture_screenshot(game_name):
     game_dir = os.path.join(DATA_DIR, game_name)
     os.makedirs(game_dir, exist_ok=True)
@@ -38,44 +44,19 @@ def extract_video_id(url):
     elif "embed/" in url: return url.split("embed/")[1].split("?")[0]
     return ""
 
-def get_js_iframe_html(video_id):
-    """Bulletproof JS Bridge"""
+def get_simple_iframe_html(video_id):
     return f"""
     <!DOCTYPE html><html><head>
+        <meta name="referrer" content="strict-origin-when-cross-origin"/>
         <style>body, html {{ margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }}</style>
     </head><body>
-        <div id="player"></div>
-        <script>
-            var tag = document.createElement('script');
-            tag.src = "https://www.youtube.com/iframe_api";
-            var firstScriptTag = document.getElementsByTagName('script')[0];
-            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-            var player;
-            function onYouTubeIframeAPIReady() {{
-                player = new YT.Player('player', {{
-                    height: '100%', width: '100%', videoId: '{video_id}',
-                    playerVars: {{ 'playsinline': 1, 'autoplay': 0, 'rel': 0, 'modestbranding': 1, 'origin': 'https://localhost' }},
-                    events: {{
-                        'onStateChange': function(event) {{
-                            if (event.data === 1) {{ console.log("TACTIQ_PLAYING"); }}
-                            else if (event.data === 2 || event.data === 0) {{ console.log("TACTIQ_STOPPED"); }}
-                        }}
-                    }}
-                }});
-            }}
-        </script>
+        <iframe width="100%" height="100%" src="https://www.youtube-nocookie.com/embed/{video_id}?autoplay=0&rel=0" frameborder="0" allow="autoplay; encrypted-media; fullscreen"></iframe>
     </body></html>
     """
 
-class CustomWebPage(QWebEnginePage):
-    state_changed = pyqtSignal(bool)
-    def javaScriptConsoleMessage(self, level, message, lineNumber, sourceID):
-        """Mutes all Chromium warnings and only listens for PiP triggers"""
-        if "TACTIQ_PLAYING" in message:
-            self.state_changed.emit(True)
-        elif "TACTIQ_STOPPED" in message:
-            self.state_changed.emit(False)
-
+# ==========================================
+# 2. BACKGROUND WORKERS
+# ==========================================
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(list, str, list)
     error_signal = pyqtSignal(str)
@@ -95,9 +76,19 @@ class GeminiWorker(QThread):
         try:
             game = detect_running_game()
             img, filename = capture_screenshot(game)
+            
+            # --- NEW: CONCURRENT API CALLS ---
+            # We run analyze_screenshot and youtube_search at the EXACT same time
+            # because youtube_search can use a generic fallback if needed immediately.
+            # Then we run the chat greeting.
+            
             analysis = analyze_screenshot(img, game)
+            
+            # Backend logging
             summary = summarize_analysis(analysis)
-
+            print(summary) 
+            
+            # Extract basic data needed for parallel tasks
             if isinstance(analysis, dict):
                 yt_query = analysis.get("youtube_search", "")
                 if isinstance(yt_query, list): yt_query = " ".join(yt_query)
@@ -106,224 +97,63 @@ class GeminiWorker(QThread):
                 yt_query = ""
                 tips = ["Active Game Detected.", "Check analysis for tactical details."]
 
-            videos = search_tutorials(yt_query, game)
+            if not yt_query or len(yt_query) < 3:
+                area = analysis.get('current_area', '')
+                yt_query = f"{game} {area} guide"
+
+            # Execute the heavy Chat Generation and YouTube Search SIMULTANEOUSLY
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Start both tasks
+                future_greeting = executor.submit(generate_chat_greeting, game, analysis)
+                future_youtube = executor.submit(search_tutorials, yt_query, game)
+                
+                # Wait for both to finish
+                greeting = future_greeting.result()
+                
+                videos = []
+                try:
+                    videos = future_youtube.result()
+                except Exception as e:
+                    print(f"YT Search Error: {e}")
+                    
+            # Fallback if primary YT search failed
+            if not videos:
+                try:
+                    videos = search_tutorials(f"{game} tips and tricks", game)
+                except:
+                    pass
+
             video_ids = [extract_video_id(v.get('url', '')) for v in videos]
-            self.finished_signal.emit(tips, str(summary), video_ids)
+            
+            self.finished_signal.emit(tips, greeting, video_ids)
+            
         except Exception as e:
             self.error_signal.emit(str(e))
 
-
-# ==========================================
-# 4. MAIN HUD OVERLAY
-# ==========================================
-class TacTiQOverlay(QWidget):
+class YouTubeWorker(QThread):
+    finished_signal = pyqtSignal(list)
     def __init__(self):
         super().__init__()
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        # Core State
-        self.is_pip_mode = False
-        self.playing_video_view = None
-        self.oldPos = QPoint()
+        self.query = ""
+    def run(self):
+        game = detect_running_game()
+        videos = search_tutorials(self.query, game)
+        video_ids = [extract_video_id(v.get('url', '')) for v in videos]
+        self.finished_signal.emit(video_ids)
 
-        # Master Layout
-        self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
+class ChatWorker(QThread):
+    finished_signal = pyqtSignal(str)
+    def __init__(self):
+        super().__init__()
+        self.message = ""
+    def run(self):
+        game = detect_running_game()
+        response = chat_with_tactiq(game, self.message)
+        self.finished_signal.emit(response)
 
-        # --- DASHBOARD CONTAINER (Fullscreen Mode) ---
-        self.dash_widget = QWidget()
-        self.dash_layout = QHBoxLayout(self.dash_widget)
-        self.dash_layout.setContentsMargins(50, 50, 50, 50)
-        self.dash_layout.setSpacing(35)
-
-        self.left_col = QVBoxLayout()
-        self.lbl_tips_header = QLabel("Alerts")
-        self.lbl_tips_header.setObjectName("ColHeader")
-        self.left_col.addWidget(self.lbl_tips_header)
-        self.tips_container = QWidget()
-        self.tips_layout = QVBoxLayout(self.tips_container)
-        self.tips_layout.setContentsMargins(0, 0, 0, 0)
-        self.tips_layout.setSpacing(12) 
-        self.left_col.addWidget(self.tips_container)
-        self.left_col.addStretch() 
-        self.dash_layout.addLayout(self.left_col, stretch=20)
-
-        self.mid_col = QVBoxLayout()
-        self.lbl_analysis_header = QLabel("Analysis")
-        self.lbl_analysis_header.setObjectName("ColHeader")
-        self.mid_col.addWidget(self.lbl_analysis_header)
-        self.analysis_frame = QFrame()
-        self.analysis_frame.setObjectName("GameBarContainer")
-        self.analysis_layout = QVBoxLayout(self.analysis_frame)
-        self.analysis_layout.setContentsMargins(25, 25, 25, 25)
-        self.summary_label = QLabel("Awaiting Scan...")
-        self.summary_label.setWordWrap(True)
-        self.summary_label.setObjectName("AnalysisText")
-        self.analysis_layout.addWidget(self.summary_label)
-        self.mid_col.addWidget(self.analysis_frame)
-        self.mid_col.addStretch() 
-        self.dash_layout.addLayout(self.mid_col, stretch=55)
-
-        self.right_col = QVBoxLayout()
-        self.lbl_yt_header = QLabel("Resources")
-        self.lbl_yt_header.setObjectName("ColHeader")
-        self.right_col.addWidget(self.lbl_yt_header)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setObjectName("GameBarContainer") 
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.yt_container = QWidget()
-        self.yt_container.setStyleSheet("background: transparent;")
-        self.yt_layout = QVBoxLayout(self.yt_container)
-        self.yt_layout.setContentsMargins(15, 15, 15, 15)
-        self.yt_layout.setSpacing(20) 
-        self.scroll.setWidget(self.yt_container)
-        self.right_col.addWidget(self.scroll)
-        self.dash_layout.addLayout(self.right_col, stretch=25)
-
-        # --- PIP CONTAINER (Collapsed Mode) ---
-        self.pip_widget = QWidget()
-        self.pip_layout = QVBoxLayout(self.pip_widget)
-        self.pip_layout.setContentsMargins(0, 0, 0, 0)
-        self.pip_layout.setSpacing(0)
-
-        self.pip_toolbar = QFrame()
-        self.pip_toolbar.setFixedHeight(30)
-        self.pip_toolbar.setStyleSheet("background-color: rgba(20, 20, 20, 255);")
-        t_layout = QHBoxLayout(self.pip_toolbar)
-        t_layout.setContentsMargins(10, 0, 5, 0)
-        
-        lbl = QLabel("TacTiQ PiP")
-        lbl.setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI Variable Display'; font-weight: bold; font-size: 12px;")
-        btn_close = QPushButton("✕")
-        btn_close.setFixedSize(24, 24)
-        btn_close.setStyleSheet("QPushButton { color: white; background: transparent; border: none; font-weight: bold; } QPushButton:hover { background: #FF4444; border-radius: 4px; }")
-        btn_close.clicked.connect(self.close_pip)
-        
-        t_layout.addWidget(lbl)
-        t_layout.addStretch()
-        t_layout.addWidget(btn_close)
-
-        self.pip_video_area = QVBoxLayout()
-        self.pip_layout.addWidget(self.pip_toolbar)
-        self.pip_layout.addLayout(self.pip_video_area)
-        self.pip_widget.hide() 
-
-        self.main_layout.addWidget(self.dash_widget)
-        self.main_layout.addWidget(self.pip_widget)
-
-        self.setStyleSheet("""
-            #ColHeader { color: #FFFFFF; font-family: 'Segoe UI Variable Display', sans-serif; font-size: 16px; font-weight: 600; padding-bottom: 5px; }
-            #GameBarContainer { background-color: rgba(32, 32, 32, 220); border: 1px solid rgba(255, 255, 255, 15); border-radius: 8px; }
-            #TipCard { background-color: rgba(42, 42, 42, 230); border: 1px solid rgba(255, 255, 255, 15); border-radius: 6px; padding: 14px; }
-            #TipText { color: #E6E6E6; font-family: 'Segoe UI Variable Text', sans-serif; font-size: 14px; line-height: 1.4; background: transparent; }
-            #AnalysisText { background-color: transparent; color: #FFFFFF; border: none; font-size: 16px; font-family: 'Segoe UI Variable Text', sans-serif; line-height: 1.5; }
-        """)
-
-        self.video_widgets = []
-        self.placeholders = []
-        
-        for i in range(5): 
-            placeholder = QVBoxLayout()
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.yt_layout.addLayout(placeholder)
-            self.placeholders.append(placeholder)
-            
-            view = QWebEngineView()
-            view.setFixedSize(320, 180) 
-            view.page().setBackgroundColor(Qt.GlobalColor.transparent)
-            
-            page = CustomWebPage()
-            view.setPage(page)
-            page.state_changed.connect(lambda is_playing, v=view: self.on_video_state_changed(is_playing, v))
-            
-            view.hide()
-            placeholder.addWidget(view)
-            self.video_widgets.append(view)
-
-        # Removed the buggy QTimer! We rely completely on global hotkeys now.
-
-    def on_video_state_changed(self, is_playing, view_widget):
-        if is_playing: self.playing_video_view = view_widget
-        elif self.playing_video_view == view_widget: self.playing_video_view = None
-
-    def collapse_to_pip(self):
-        self.is_pip_mode = True
-        self.dash_widget.hide()
-        self.pip_video_area.addWidget(self.playing_video_view)
-        self.pip_widget.show()
-        self.showNormal()
-        self.resize(320, 180 + 30) 
-        screen = QApplication.primaryScreen().geometry()
-        self.move(screen.width() - 340, screen.height() - 260)
-
-    def expand_to_dashboard(self):
-        self.is_pip_mode = False
-        self.pip_widget.hide()
-        if self.playing_video_view:
-            idx = self.video_widgets.index(self.playing_video_view)
-            self.placeholders[idx].addWidget(self.playing_video_view)
-        self.dash_widget.show()
-        self.showFullScreen()
-
-    def toggle_overlay(self):
-        if self.is_pip_mode:
-            self.expand_to_dashboard()
-        elif self.isVisible():
-            if self.playing_video_view:
-                self.collapse_to_pip()
-            else:
-                self.hide()
-        else:
-            self.expand_to_dashboard()
-
-    def close_pip(self):
-        if self.playing_video_view:
-            self.playing_video_view.setHtml("") 
-            self.playing_video_view = None
-        self.hide()
-        self.is_pip_mode = False
-
-    def mousePressEvent(self, event):
-        if self.is_pip_mode: self.oldPos = event.globalPosition().toPoint()
-
-    def mouseMoveEvent(self, event):
-        if self.is_pip_mode and hasattr(self, 'oldPos'):
-            delta = event.globalPosition().toPoint() - self.oldPos
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.oldPos = event.globalPosition().toPoint()
-
-    def update_parameters(self, tips: list, analysis: str, video_ids: list):
-        for i in reversed(range(self.tips_layout.count())):
-            self.tips_layout.itemAt(i).widget().setParent(None)
-        for text in tips:
-            card = QFrame()
-            card.setObjectName("TipCard")
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(15, 15, 15, 15)
-            body = QLabel(text)
-            body.setWordWrap(True)
-            body.setObjectName("TipText")
-            card_layout.addWidget(body)
-            self.tips_layout.addWidget(card)
-
-        self.summary_label.setText(analysis.replace('\n', '<br>'))
-        for vw in self.video_widgets:
-            vw.hide()
-            vw.setHtml("")
-        for i, vid in enumerate(video_ids[:5]):
-            if vid:
-                self.video_widgets[i].setHtml(get_js_iframe_html(vid), QUrl("https://localhost"))
-                self.video_widgets[i].show()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        if not self.is_pip_mode:
-            painter.fillRect(self.rect(), QColor(0, 0, 0, 160))
-        else:
-            painter.fillRect(self.rect(), QColor(25, 25, 25, 255))
-
+# ==========================================
+# 3. TOAST NOTIFICATION
+# ==========================================
 class ToastNotification(QWidget):
     def __init__(self):
         super().__init__()
@@ -334,15 +164,15 @@ class ToastNotification(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(20, 0, 20, 0)
         self.label = QLabel("")
-        self.label.setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI Variable Text'; font-size: 14px; font-weight: 600;")
+        self.label.setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: 600;")
         self.layout.addWidget(self.label, alignment=Qt.AlignmentFlag.AlignVCenter)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(QColor(32, 32, 32, 230))
-        painter.setPen(QColor(255, 255, 255, 40)) 
-        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 6, 6)
+        painter.setBrush(QColor(20, 20, 25, 240))
+        painter.setPen(QColor(168, 85, 247, 80)) 
+        painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
 
     def show_toast(self, message, duration=None):
         self.label.setText(message)
@@ -350,13 +180,264 @@ class ToastNotification(QWidget):
         if duration:
             QTimer.singleShot(duration, self.hide)
 
+
+# ==========================================
+# 4. MAIN HUD OVERLAY (FROSTED GLASS & CHAT)
+# ==========================================
+class TacTiQOverlay(QWidget):
+    search_requested = pyqtSignal(str) 
+    chat_submitted = pyqtSignal(str) 
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setGeometry(QApplication.primaryScreen().geometry())
+        
+        self.current_video_ids = ["", "", ""]
+
+        self.dash_layout = QHBoxLayout(self)
+        self.dash_layout.setContentsMargins(40, 40, 40, 40)
+        self.dash_layout.setSpacing(25)
+
+        # --- LEFT: TIPS (Alerts) ---
+        self.left_col = QVBoxLayout()
+        self.lbl_tips_header = QLabel("TACTICAL ALERTS")
+        self.lbl_tips_header.setObjectName("ColHeader")
+        self.left_col.addWidget(self.lbl_tips_header)
+        
+        self.tips_container = QWidget()
+        self.tips_layout = QVBoxLayout(self.tips_container)
+        self.tips_layout.setContentsMargins(0, 0, 0, 0)
+        self.tips_layout.setSpacing(12) 
+        self.left_col.addWidget(self.tips_container)
+        self.left_col.addStretch() 
+        self.dash_layout.addLayout(self.left_col, stretch=20)
+
+        # --- MIDDLE: AI CHATBOT INTERFACE ---
+        self.mid_col = QVBoxLayout()
+        self.lbl_chat_header = QLabel("TACTIQ AI ASSISTANT")
+        self.lbl_chat_header.setObjectName("ColHeader")
+        self.mid_col.addWidget(self.lbl_chat_header)
+        
+        self.chat_frame = QFrame()
+        self.chat_frame.setObjectName("GlassContainer")
+        self.chat_layout = QVBoxLayout(self.chat_frame)
+        self.chat_layout.setContentsMargins(15, 15, 15, 15)
+        self.chat_layout.setSpacing(10)
+
+        self.chat_scroll = QScrollArea()
+        self.chat_scroll.setWidgetResizable(True)
+        self.chat_scroll.setObjectName("TransparentScroll")
+        self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        self.chat_history_widget = QWidget()
+        self.chat_history_widget.setStyleSheet("background: transparent;")
+        self.chat_history_layout = QVBoxLayout(self.chat_history_widget)
+        self.chat_history_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.chat_history_layout.setSpacing(16)
+        self.chat_scroll.setWidget(self.chat_history_widget)
+        
+        self.chat_layout.addWidget(self.chat_scroll)
+
+        self.chat_input_layout = QHBoxLayout()
+        self.chat_input = QLineEdit()
+        self.chat_input.setPlaceholderText("Ask TacTiQ anything about the game...")
+        self.chat_input.setObjectName("ChatInput")
+        self.chat_input.returnPressed.connect(self.emit_chat)
+        
+        self.btn_send = QPushButton("➤")
+        self.btn_send.setObjectName("SendBtn")
+        self.btn_send.clicked.connect(self.emit_chat)
+        
+        self.chat_input_layout.addWidget(self.chat_input)
+        self.chat_input_layout.addWidget(self.btn_send)
+        self.chat_layout.addLayout(self.chat_input_layout)
+
+        self.mid_col.addWidget(self.chat_frame)
+        self.dash_layout.addLayout(self.mid_col, stretch=55)
+
+        # --- RIGHT: YOUTUBE & SEARCH ---
+        self.right_col = QVBoxLayout()
+        self.lbl_yt_header = QLabel("RESOURCES")
+        self.lbl_yt_header.setObjectName("ColHeader")
+        self.right_col.addWidget(self.lbl_yt_header)
+
+        self.search_layout = QHBoxLayout()
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search YouTube...")
+        self.search_bar.setObjectName("SearchBar")
+        self.search_bar.returnPressed.connect(self.emit_search)
+        self.btn_search = QPushButton("🔍")
+        self.btn_search.setObjectName("SearchBtn")
+        self.btn_search.clicked.connect(self.emit_search)
+        
+        self.search_layout.addWidget(self.search_bar)
+        self.search_layout.addWidget(self.btn_search)
+        self.right_col.addLayout(self.search_layout)
+        
+        self.yt_container = QWidget()
+        self.yt_container.setObjectName("GlassContainer") 
+        self.yt_layout = QVBoxLayout(self.yt_container)
+        self.yt_layout.setContentsMargins(15, 15, 15, 15)
+        self.yt_layout.setSpacing(15) 
+        self.right_col.addWidget(self.yt_container)
+        self.right_col.addStretch() 
+        self.dash_layout.addLayout(self.right_col, stretch=25)
+
+        # --- PREMIUM TYPOGRAPHY STYLESHEET ---
+        self.setStyleSheet("""
+            * { font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; }
+            #ColHeader { 
+                color: #FFFFFF; font-size: 13px; font-weight: 800; letter-spacing: 1.5px; padding-bottom: 5px; 
+            }
+            #GlassContainer { 
+                background-color: rgba(20, 20, 25, 160); border: 1px solid rgba(255, 255, 255, 15); border-radius: 16px; 
+            }
+            #TransparentScroll { background: transparent; border: none; }
+            
+            #TipCard { background-color: rgba(30, 30, 35, 180); border-left: 4px solid #A855F7; border-radius: 12px; }
+            #TipText { color: #E2E8F0; font-size: 14.5px; }
+            
+            #UserBubble {
+                background-color: #8B5CF6; color: white; 
+                border-radius: 16px; border-top-right-radius: 4px; padding: 12px 16px; 
+            }
+            #AIBubble {
+                background-color: rgba(35, 35, 40, 240); color: #E2E8F0; 
+                border: 1px solid rgba(255, 255, 255, 10);
+                border-radius: 16px; border-top-left-radius: 4px; padding: 12px 16px; 
+            }
+            #ChatNameTag {
+                color: #A855F7; font-size: 11px; font-weight: 800; letter-spacing: 1px; padding-left: 2px;
+            }
+            
+            #ChatInput, #SearchBar { 
+                background-color: rgba(10, 10, 12, 180); color: #FFF; 
+                border: 1px solid rgba(255,255,255,20); border-radius: 20px; padding: 10px 18px; font-size: 14px; 
+            }
+            #ChatInput:focus, #SearchBar:focus { border: 1px solid #A855F7; }
+            
+            #SendBtn, #SearchBtn { 
+                background-color: rgba(168, 85, 247, 180); color: #FFF; 
+                border: none; border-radius: 20px; padding: 10px 18px; font-weight: bold;
+            }
+            #SendBtn:hover, #SearchBtn:hover { background-color: rgba(168, 85, 247, 255); }
+        """)
+
+        self.add_chat_bubble("Welcome to TacTiQ! Press F8 to scan your screen, or ask me a question.", is_user=False)
+
+        self.video_widgets = []
+        for _ in range(3): 
+            view = QWebEngineView()
+            view.setFixedSize(320, 180) 
+            view.page().setBackgroundColor(Qt.GlobalColor.transparent)
+            view.setStyleSheet("background: rgba(10,10,12,150); border-radius: 12px;")
+            self.yt_layout.addWidget(view, alignment=Qt.AlignmentFlag.AlignCenter)
+            self.video_widgets.append(view)
+
+    def emit_search(self):
+        query = self.search_bar.text().strip()
+        if query: self.search_requested.emit(query)
+
+    def emit_chat(self):
+        text = self.chat_input.text().strip()
+        if text:
+            self.add_chat_bubble(text, is_user=True)
+            self.chat_input.clear()
+            self.chat_submitted.emit(text)
+
+    def add_chat_bubble(self, text, is_user=False):
+        bubble_container = QWidget()
+        bubble_layout = QVBoxLayout(bubble_container)
+        bubble_layout.setContentsMargins(0, 0, 0, 10) 
+        bubble_layout.setSpacing(4)
+        
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        
+        lbl = QLabel()
+        formatted_text = f"<div style='line-height: 1.5; font-size: 14.5px;'>{text}</div>"
+        lbl.setText(formatted_text)
+        lbl.setWordWrap(True)
+        lbl.setMaximumWidth(480) 
+        
+        if is_user:
+            lbl.setObjectName("UserBubble")
+            row_layout.addStretch()
+            row_layout.addWidget(lbl)
+            bubble_layout.addLayout(row_layout)
+        else:
+            lbl.setObjectName("AIBubble")
+            name_lbl = QLabel("✧ TACTIQ AI")
+            name_lbl.setObjectName("ChatNameTag")
+            bubble_layout.addWidget(name_lbl)
+            
+            row_layout.addWidget(lbl)
+            row_layout.addStretch()
+            bubble_layout.addLayout(row_layout)
+            
+        self.chat_history_layout.addWidget(bubble_container)
+        QTimer.singleShot(100, lambda: self.chat_scroll.verticalScrollBar().setValue(self.chat_scroll.verticalScrollBar().maximum()))
+
+    def load_videos(self, video_ids: list):
+        self.current_video_ids = video_ids + [""] * (3 - len(video_ids))
+        for i, vid in enumerate(self.current_video_ids[:3]):
+            if vid:
+                self.video_widgets[i].setHtml(get_simple_iframe_html(vid), QUrl("https://localhost"))
+            else:
+                self.video_widgets[i].setHtml("")
+
+    def update_parameters(self, tips: list, greeting: str, video_ids: list):
+        for i in reversed(range(self.tips_layout.count())):
+            self.tips_layout.itemAt(i).widget().setParent(None)
+        
+        icons = ["🎯", "⚔️", "🛡️", "⚡", "🔥"]
+        for text in tips:
+            card = QFrame()
+            card.setObjectName("TipCard")
+            card_layout = QHBoxLayout(card)
+            card_layout.setContentsMargins(15, 15, 15, 15)
+            
+            icon_lbl = QLabel(random.choice(icons))
+            icon_lbl.setStyleSheet("font-size: 20px; background: transparent;")
+            card_layout.addWidget(icon_lbl, alignment=Qt.AlignmentFlag.AlignTop)
+            
+            body = QLabel(text)
+            body.setWordWrap(True)
+            body.setObjectName("TipText")
+            card_layout.addWidget(body)
+            self.tips_layout.addWidget(card)
+
+        self.add_chat_bubble(greeting, is_user=False)
+        self.load_videos(video_ids)
+
+    def hide_overlay(self):
+        for view in self.video_widgets:
+            view.setHtml("")
+        self.hide()
+
+    def show_overlay(self):
+        self.load_videos(self.current_video_ids)
+        self.showFullScreen()
+        self.activateWindow()
+        self.setFocus()
+
+    def toggle_overlay(self):
+        if self.isVisible(): self.hide_overlay()
+        else: self.show_overlay()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(10, 10, 15, 190))
+
+
 # ==========================================
 # 5. SIGNAL BRIDGE & CONTROLLER
 # ==========================================
 class HotkeyBridge(QObject):
     f8_pressed = pyqtSignal()
     f9_pressed = pyqtSignal()
-    # NEW: Signal to force close/collapse the overlay globally
     force_hide_triggered = pyqtSignal() 
 
 class AppController(QObject):
@@ -364,39 +445,60 @@ class AppController(QObject):
         super().__init__()
         self.overlay = TacTiQOverlay() 
         self.toast = ToastNotification() 
+        
         self.worker = GeminiWorker()
+        self.yt_worker = YouTubeWorker() 
+        self.chat_worker = ChatWorker()
         
         self.worker.finished_signal.connect(self.on_api_finished)
         self.worker.error_signal.connect(self.on_api_error)
+        self.yt_worker.finished_signal.connect(self.on_manual_search_finished)
+        self.chat_worker.finished_signal.connect(self.on_chat_response_received)
+        
+        self.overlay.search_requested.connect(self.perform_manual_search)
+        self.overlay.chat_submitted.connect(self.handle_chat_message)
 
         self.bridge = HotkeyBridge()
         self.bridge.f8_pressed.connect(self.take_screenshot_and_analyze)
         self.bridge.f9_pressed.connect(self.overlay.toggle_overlay)
         self.bridge.force_hide_triggered.connect(self.handle_force_hide)
 
-        print("TacTiQ running... F8: Capture | F9: Toggle Overlay | Esc/Alt+Tab: Hide/PiP")
+        print("TacTiQ running... F8: Capture | F9: Toggle Overlay | Esc/Alt+Tab: Hide")
         
-        # Globally bind hotkeys to our signals
         keyboard.add_hotkey('f8', self.bridge.f8_pressed.emit)
         keyboard.add_hotkey('f9', self.bridge.f9_pressed.emit)
         keyboard.add_hotkey('esc', self.bridge.force_hide_triggered.emit)
         keyboard.add_hotkey('alt+tab', self.bridge.force_hide_triggered.emit)
 
+    def handle_chat_message(self, text):
+        if self.chat_worker.isRunning(): return
+        self.toast.show_toast("TacTiQ: Thinking...", duration=2000)
+        self.chat_worker.message = text
+        self.chat_worker.start()
+
+    def on_chat_response_received(self, response_text):
+        self.overlay.add_chat_bubble(response_text, is_user=False)
+
     def handle_force_hide(self):
-        """Forces the overlay to hide or collapse into PiP instantly"""
-        if self.overlay.isVisible() and not self.overlay.is_pip_mode:
-            if self.overlay.playing_video_view:
-                self.overlay.collapse_to_pip()
-            else:
-                self.overlay.hide()
+        if self.overlay.isVisible():
+            self.overlay.hide_overlay() 
+
+    def perform_manual_search(self, query):
+        if self.yt_worker.isRunning(): return
+        self.toast.show_toast(f"Searching for '{query}'...", duration=2000)
+        self.yt_worker.query = query
+        self.yt_worker.start()
+
+    def on_manual_search_finished(self, urls):
+        self.overlay.load_videos(urls) 
 
     def take_screenshot_and_analyze(self):
         if self.worker.isRunning(): return 
         self.toast.show_toast("TacTiQ: Capturing & Analyzing...", duration=None)
         self.worker.start()
 
-    def on_api_finished(self, tips, analysis, urls):
-        self.overlay.update_parameters(tips, analysis, urls)
+    def on_api_finished(self, tips, greeting, urls):
+        self.overlay.update_parameters(tips, greeting, urls)
         self.toast.show_toast("TacTiQ Intel Ready. Press F9.", duration=4000)
 
     def on_api_error(self, error_msg):
