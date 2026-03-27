@@ -23,9 +23,8 @@ from youtube_search import search_tutorials
 
 DATA_DIR = "data/screenshots"
 
-# ==========================================
 # 1. CAPTURE LOGIC & UTILS
-# ==========================================
+
 def capture_screenshot(game_name):
     game_dir = os.path.join(DATA_DIR, game_name)
     os.makedirs(game_dir, exist_ok=True)
@@ -54,9 +53,9 @@ def get_simple_iframe_html(video_id):
     </body></html>
     """
 
-# ==========================================
+
 # 2. BACKGROUND WORKERS
-# ==========================================
+
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(list, str, list)
     error_signal = pyqtSignal(str)
@@ -151,9 +150,9 @@ class ChatWorker(QThread):
         response = chat_with_tactiq(game, self.message)
         self.finished_signal.emit(response)
 
-# ==========================================
+
 # 3. TOAST NOTIFICATION
-# ==========================================
+
 class ToastNotification(QWidget):
     def __init__(self):
         super().__init__()
@@ -181,9 +180,9 @@ class ToastNotification(QWidget):
             QTimer.singleShot(duration, self.hide)
 
 
-# ==========================================
+
 # 4. MAIN HUD OVERLAY (FROSTED GLASS & CHAT)
-# ==========================================
+
 class TacTiQOverlay(QWidget):
     search_requested = pyqtSignal(str) 
     chat_submitted = pyqtSignal(str) 
@@ -432,9 +431,9 @@ class TacTiQOverlay(QWidget):
         painter.fillRect(self.rect(), QColor(10, 10, 15, 190))
 
 
-# ==========================================
 # 5. SIGNAL BRIDGE & CONTROLLER
-# ==========================================
+
+
 class HotkeyBridge(QObject):
     f8_pressed = pyqtSignal()
     f9_pressed = pyqtSignal()
