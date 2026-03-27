@@ -33,7 +33,7 @@ https://github.com/user-attachments/assets/2cb0412c-6f10-4c88-906f-f57b779eb533
 **2. The TacTiQ Overlay (Output)**
 | Tactical Analysis | Smart YouTube Integration | Context-Aware AI Chat |
 | :---: | :---: | :---: |
-| <img src="https://github.com/user-attachments/assets/c39d83aa-d3c1-47d3-b644-f66b8f843914" width="100%"> | <img src="https://github.com/user-attachments/assets/b5e6fc26-578b-4de3-86fe-488f0e7c816e" width="100%"> | <img src="https://github.com/user-attachments/assets/dac353bf-6ce8-4494-bfc7-52f6a4fe125b" width="100%"> |
+|<img width="1919" height="1079" alt="Screenshot 2026-03-27 190303" src="https://github.com/user-attachments/assets/78d2ae6a-21d1-4bfc-a8a2-9efd80936e68" /> | <img width="511" height="957" alt="Screenshot 2026-03-27 190022" src="https://github.com/user-attachments/assets/dc6e438b-27bf-4d2d-b190-f7e14171eec8" />| <img width="1919" height="1079" alt="Screenshot 2026-03-27 185929" src="https://github.com/user-attachments/assets/d8b3473a-68f4-4ffd-9759-7910b43ffdb9" /> |
 
 > *TacTiQ correctly identifying John Marston based on the game stage and environment providing tactical tips and embedded tutorial videos in real-time.*
 
