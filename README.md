@@ -22,7 +22,11 @@ No alt-tabbing. No typing. No breaking immersion.
 ###  See TacTiQ in Action: Red Dead Redemption 2 🐎
 
 **1. The Gameplay Capture (Input)**
-<img src="https://github.com/user-attachments/assets/dd4b2d5b-7669-4573-ad45-245d5790c1d6" width="100%">
+
+
+https://github.com/user-attachments/assets/2cb0412c-6f10-4c88-906f-f57b779eb533
+> ⚡ **Performance Note:** TacTiQ's response time is directly linked with Google's API latency. High-complexity scenes may take a few seconds to process.
+
 
 <br>
 
