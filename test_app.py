@@ -6,7 +6,6 @@ from datetime import datetime
 import keyboard
 import mss
 from PIL import Image
-import concurrent.futures # <-- NEW: For simultaneous API calls
 
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QScrollArea, QFrame, QLabel, QPushButton, QLineEdit)
@@ -18,13 +17,14 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineSettings
 
 from game_detector import detect_running_game
-from gemini_analyzer import analyze_screenshot, summarize_analysis, chat_with_tactiq, generate_chat_greeting
+from gemini_analyzer import analyze_screenshot, summarize_analysis, chat_with_tactiq
 from youtube_search import search_tutorials
 
 DATA_DIR = "data/screenshots"
 
+# ==========================================
 # 1. CAPTURE LOGIC & UTILS
-
+# ==========================================
 def capture_screenshot(game_name):
     game_dir = os.path.join(DATA_DIR, game_name)
     os.makedirs(game_dir, exist_ok=True)
@@ -53,11 +53,11 @@ def get_simple_iframe_html(video_id):
     </body></html>
     """
 
-
+# ==========================================
 # 2. BACKGROUND WORKERS
-
+# ==========================================
 class GeminiWorker(QThread):
-    finished_signal = pyqtSignal(list, str, list)
+    finished_signal = pyqtSignal(list, str, str)
     error_signal = pyqtSignal(str)
 
     def parse_tips(self, raw_tips):
@@ -76,18 +76,9 @@ class GeminiWorker(QThread):
             game = detect_running_game()
             img, filename = capture_screenshot(game)
             
-            # --- NEW: CONCURRENT API CALLS ---
-            # We run analyze_screenshot and youtube_search at the EXACT same time
-            # because youtube_search can use a generic fallback if needed immediately.
-            # Then we run the chat greeting.
-            
             analysis = analyze_screenshot(img, game)
-            
-            # Backend logging
-            summary = summarize_analysis(analysis)
-            print(summary) 
-            
-            # Extract basic data needed for parallel tasks
+            greeting = analysis.get("chat_greeting", "Scan complete. How can I help?")
+
             if isinstance(analysis, dict):
                 yt_query = analysis.get("youtube_search", "")
                 if isinstance(yt_query, list): yt_query = " ".join(yt_query)
@@ -100,32 +91,7 @@ class GeminiWorker(QThread):
                 area = analysis.get('current_area', '')
                 yt_query = f"{game} {area} guide"
 
-            # Execute the heavy Chat Generation and YouTube Search SIMULTANEOUSLY
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                # Start both tasks
-                future_greeting = executor.submit(generate_chat_greeting, game, analysis)
-                future_youtube = executor.submit(search_tutorials, yt_query, game)
-                
-                # Wait for both to finish
-                greeting = future_greeting.result()
-                
-                videos = []
-                try:
-                    videos = future_youtube.result()
-                except Exception as e:
-                    print(f"YT Search Error: {e}")
-                    
-            # Fallback if primary YT search failed
-            if not videos:
-                try:
-                    videos = search_tutorials(f"{game} tips and tricks", game)
-                except:
-                    pass
-
-            video_ids = [extract_video_id(v.get('url', '')) for v in videos]
-            
-            self.finished_signal.emit(tips, greeting, video_ids)
-            
+            self.finished_signal.emit(tips, greeting, yt_query)
         except Exception as e:
             self.error_signal.emit(str(e))
 
@@ -136,7 +102,17 @@ class YouTubeWorker(QThread):
         self.query = ""
     def run(self):
         game = detect_running_game()
-        videos = search_tutorials(self.query, game)
+        videos = []
+        try:
+            videos = search_tutorials(self.query, game)
+        except Exception as e:
+            print(f"YT Search Error: {e}")
+        
+        if not videos:
+            try:
+                videos = search_tutorials(f"{game} tips and tricks", game)
+            except: pass
+
         video_ids = [extract_video_id(v.get('url', '')) for v in videos]
         self.finished_signal.emit(video_ids)
 
@@ -146,25 +122,54 @@ class ChatWorker(QThread):
         super().__init__()
         self.message = ""
     def run(self):
-        game = detect_running_game()
-        response = chat_with_tactiq(game, self.message)
-        self.finished_signal.emit(response)
+        try:
+            game = detect_running_game()
+            response = chat_with_tactiq(game, self.message)
+            self.finished_signal.emit(response)
+        except Exception as e:
+            # Prevent silent thread death if API crashes
+            self.finished_signal.emit(f"Connection error. Please try again.")
 
-
+# ==========================================
 # 3. TOAST NOTIFICATION
-
+# ==========================================
 class ToastNotification(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.WindowTransparentForInput)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
         screen = QApplication.primaryScreen().geometry()
-        self.setGeometry(screen.width() - 320, screen.height() - 110, 300, 50)
+        self.setGeometry(screen.width() - 320, screen.height() - 125, 300, 65) 
+        
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(20, 0, 20, 0)
-        self.label = QLabel("")
-        self.label.setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: 600;")
-        self.layout.addWidget(self.label, alignment=Qt.AlignmentFlag.AlignVCenter)
+        self.layout.setContentsMargins(20, 10, 20, 10)
+        self.layout.setSpacing(2)
+
+        self.top_label = QLabel("")
+        self.top_label.setStyleSheet("color: rgba(255, 255, 255, 120); font-family: 'Segoe UI', Roboto, sans-serif; font-size: 11.5px;")
+        self.layout.addWidget(self.top_label)
+
+        self.bottom_label = QLabel("")
+        self.bottom_label.setStyleSheet("color: #FFFFFF; font-family: 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: 600;")
+        self.layout.addWidget(self.bottom_label)
+
+        self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.spinner_idx = 0
+        self.active_statuses = [
+            "Capturing game frame...",
+            "Analyzing scenery & environment...",
+            "Identifying characters & bosses...",
+            "Obtaining mission intel...",
+            "Formulating tactical advice...",
+            "Locating YouTube guides...",
+            "Finalizing response..."
+        ]
+        self.current_status_idx = 0
+
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self.update_animation)
+        self.ticks = 0
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -173,16 +178,39 @@ class ToastNotification(QWidget):
         painter.setPen(QColor(168, 85, 247, 80)) 
         painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
 
-    def show_toast(self, message, duration=None):
-        self.label.setText(message)
+    def update_animation(self):
+        self.ticks += 1
+        self.spinner_idx = (self.spinner_idx + 1) % len(self.spinner_frames)
+        
+        if self.ticks % 12 == 0 and self.current_status_idx < len(self.active_statuses) - 1:
+            self.top_label.setText(self.active_statuses[self.current_status_idx])
+            self.current_status_idx += 1
+
+        spin_char = self.spinner_frames[self.spinner_idx]
+        current_text = self.active_statuses[self.current_status_idx]
+        self.bottom_label.setText(f"<span style='color: #A855F7;'>{spin_char}</span> {current_text}")
+
+    def show_toast(self, message, duration=None, is_analyzing=False):
+        self.anim_timer.stop()
+        
+        if is_analyzing:
+            self.current_status_idx = 0
+            self.ticks = 0
+            self.top_label.setText("Initializing TacTiQ Scan...")
+            self.bottom_label.setText(f"<span style='color: #A855F7;'>⠋</span> {self.active_statuses[0]}")
+            self.anim_timer.start(100) 
+        else:
+            self.top_label.setText("System Notification")
+            self.bottom_label.setText(message)
+
         self.show()
         if duration:
             QTimer.singleShot(duration, self.hide)
 
 
-
+# ==========================================
 # 4. MAIN HUD OVERLAY (FROSTED GLASS & CHAT)
-
+# ==========================================
 class TacTiQOverlay(QWidget):
     search_requested = pyqtSignal(str) 
     chat_submitted = pyqtSignal(str) 
@@ -199,7 +227,6 @@ class TacTiQOverlay(QWidget):
         self.dash_layout.setContentsMargins(40, 40, 40, 40)
         self.dash_layout.setSpacing(25)
 
-        # --- LEFT: TIPS (Alerts) ---
         self.left_col = QVBoxLayout()
         self.lbl_tips_header = QLabel("TACTICAL ALERTS")
         self.lbl_tips_header.setObjectName("ColHeader")
@@ -213,7 +240,6 @@ class TacTiQOverlay(QWidget):
         self.left_col.addStretch() 
         self.dash_layout.addLayout(self.left_col, stretch=20)
 
-        # --- MIDDLE: AI CHATBOT INTERFACE ---
         self.mid_col = QVBoxLayout()
         self.lbl_chat_header = QLabel("TACTIQ AI ASSISTANT")
         self.lbl_chat_header.setObjectName("ColHeader")
@@ -256,7 +282,6 @@ class TacTiQOverlay(QWidget):
         self.mid_col.addWidget(self.chat_frame)
         self.dash_layout.addLayout(self.mid_col, stretch=55)
 
-        # --- RIGHT: YOUTUBE & SEARCH ---
         self.right_col = QVBoxLayout()
         self.lbl_yt_header = QLabel("RESOURCES")
         self.lbl_yt_header.setObjectName("ColHeader")
@@ -284,7 +309,6 @@ class TacTiQOverlay(QWidget):
         self.right_col.addStretch() 
         self.dash_layout.addLayout(self.right_col, stretch=25)
 
-        # --- PREMIUM TYPOGRAPHY STYLESHEET ---
         self.setStyleSheet("""
             * { font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; }
             #ColHeader { 
@@ -298,30 +322,19 @@ class TacTiQOverlay(QWidget):
             #TipCard { background-color: rgba(30, 30, 35, 180); border-left: 4px solid #A855F7; border-radius: 12px; }
             #TipText { color: #E2E8F0; font-size: 14.5px; }
             
-            #UserBubble {
-                background-color: #8B5CF6; color: white; 
-                border-radius: 16px; border-top-right-radius: 4px; padding: 12px 16px; 
-            }
-            #AIBubble {
-                background-color: rgba(35, 35, 40, 240); color: #E2E8F0; 
-                border: 1px solid rgba(255, 255, 255, 10);
-                border-radius: 16px; border-top-left-radius: 4px; padding: 12px 16px; 
-            }
-            #ChatNameTag {
-                color: #A855F7; font-size: 11px; font-weight: 800; letter-spacing: 1px; padding-left: 2px;
-            }
-            
             #ChatInput, #SearchBar { 
                 background-color: rgba(10, 10, 12, 180); color: #FFF; 
                 border: 1px solid rgba(255,255,255,20); border-radius: 20px; padding: 10px 18px; font-size: 14px; 
             }
             #ChatInput:focus, #SearchBar:focus { border: 1px solid #A855F7; }
+            #ChatInput:disabled { background-color: rgba(10, 10, 12, 100); color: #888; border: 1px solid rgba(255,255,255,5); }
             
             #SendBtn, #SearchBtn { 
                 background-color: rgba(168, 85, 247, 180); color: #FFF; 
                 border: none; border-radius: 20px; padding: 10px 18px; font-weight: bold;
             }
             #SendBtn:hover, #SearchBtn:hover { background-color: rgba(168, 85, 247, 255); }
+            #SendBtn:disabled { background-color: rgba(168, 85, 247, 80); color: rgba(255,255,255,50); }
         """)
 
         self.add_chat_bubble("Welcome to TacTiQ! Press F8 to scan your screen, or ask me a question.", is_user=False)
@@ -346,6 +359,80 @@ class TacTiQOverlay(QWidget):
             self.chat_input.clear()
             self.chat_submitted.emit(text)
 
+    # --- NEW: iMessage Style Typing Indicator ---
+    def show_typing_indicator(self):
+        if hasattr(self, 'typing_container') and self.typing_container:
+            return
+            
+        # Lock text box
+        self.chat_input.setEnabled(False)
+        self.btn_send.setEnabled(False)
+        self.chat_input.setPlaceholderText("TacTiQ is typing...")
+        
+        self.typing_container = QWidget()
+        bubble_layout = QVBoxLayout(self.typing_container)
+        bubble_layout.setContentsMargins(0, 0, 0, 10) 
+        bubble_layout.setSpacing(4)
+        
+        row_layout = QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.typing_lbl = QLabel()
+        self.typing_lbl.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True) 
+        self.typing_lbl.setObjectName("AIBubble")
+        self.typing_lbl.setStyleSheet("""
+            QLabel {
+                background-color: rgba(35, 35, 40, 240); 
+                color: #E2E8F0; 
+                border: 1px solid rgba(255, 255, 255, 10);
+                border-radius: 16px; 
+                border-top-left-radius: 4px; 
+                padding: 12px 16px;
+                font-size: 16px;
+                font-weight: bold;
+                letter-spacing: 2px;
+            }
+        """)
+        self.typing_lbl.setText("<div style='line-height: 1.5; font-size: 16px;'>•</div>")
+        
+        name_lbl = QLabel("✧ TACTIQ AI")
+        name_lbl.setStyleSheet("color: #A855F7; font-size: 11px; font-weight: 800; letter-spacing: 1px; padding-left: 4px;")
+        
+        bubble_layout.addWidget(name_lbl)
+        row_layout.addWidget(self.typing_lbl)
+        row_layout.addStretch()
+        bubble_layout.addLayout(row_layout)
+        
+        self.chat_history_layout.addWidget(self.typing_container)
+        QTimer.singleShot(100, lambda: self.chat_scroll.verticalScrollBar().setValue(self.chat_scroll.verticalScrollBar().maximum()))
+
+        # Start animation sequence
+        self.typing_dots = 1
+        self.typing_timer = QTimer(self)
+        self.typing_timer.timeout.connect(self.animate_typing)
+        self.typing_timer.start(400) 
+
+    def animate_typing(self):
+        self.typing_dots = (self.typing_dots % 3) + 1
+        dots = "• " * self.typing_dots
+        if hasattr(self, 'typing_lbl'):
+            self.typing_lbl.setText(f"<div style='line-height: 1.5; font-size: 16px;'>{dots.strip()}</div>")
+
+    def hide_typing_indicator(self):
+        # Unlock text box
+        self.chat_input.setEnabled(True)
+        self.btn_send.setEnabled(True)
+        self.chat_input.setPlaceholderText("Ask TacTiQ anything about the game...")
+        self.chat_input.setFocus()
+        
+        if hasattr(self, 'typing_timer'):
+            self.typing_timer.stop()
+        if hasattr(self, 'typing_container') and self.typing_container:
+            self.typing_container.hide()
+            self.typing_container.deleteLater()
+            self.typing_container = None
+
+
     def add_chat_bubble(self, text, is_user=False):
         bubble_container = QWidget()
         bubble_layout = QVBoxLayout(bubble_container)
@@ -360,16 +447,47 @@ class TacTiQOverlay(QWidget):
         lbl.setText(formatted_text)
         lbl.setWordWrap(True)
         lbl.setMaximumWidth(480) 
+        lbl.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True) 
         
         if is_user:
             lbl.setObjectName("UserBubble")
+            lbl.setStyleSheet("""
+                QLabel {
+                    background-color: #8B5CF6; 
+                    color: white; 
+                    border-radius: 16px; 
+                    border-top-right-radius: 4px; 
+                    padding: 12px 16px;
+                }
+            """)
+            
+            name_lbl = QLabel("YOU")
+            name_lbl.setStyleSheet("color: rgba(255, 255, 255, 140); font-size: 11px; font-weight: 800; letter-spacing: 1px; padding-right: 4px;")
+            
+            name_layout = QHBoxLayout()
+            name_layout.addStretch()
+            name_layout.addWidget(name_lbl)
+            bubble_layout.addLayout(name_layout)
+            
             row_layout.addStretch()
             row_layout.addWidget(lbl)
             bubble_layout.addLayout(row_layout)
         else:
             lbl.setObjectName("AIBubble")
+            lbl.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(35, 35, 40, 240); 
+                    color: #E2E8F0; 
+                    border: 1px solid rgba(255, 255, 255, 10);
+                    border-radius: 16px; 
+                    border-top-left-radius: 4px; 
+                    padding: 12px 16px;
+                }
+            """)
+            
             name_lbl = QLabel("✧ TACTIQ AI")
-            name_lbl.setObjectName("ChatNameTag")
+            name_lbl.setStyleSheet("color: #A855F7; font-size: 11px; font-weight: 800; letter-spacing: 1px; padding-left: 4px;")
+            
             bubble_layout.addWidget(name_lbl)
             
             row_layout.addWidget(lbl)
@@ -379,15 +497,7 @@ class TacTiQOverlay(QWidget):
         self.chat_history_layout.addWidget(bubble_container)
         QTimer.singleShot(100, lambda: self.chat_scroll.verticalScrollBar().setValue(self.chat_scroll.verticalScrollBar().maximum()))
 
-    def load_videos(self, video_ids: list):
-        self.current_video_ids = video_ids + [""] * (3 - len(video_ids))
-        for i, vid in enumerate(self.current_video_ids[:3]):
-            if vid:
-                self.video_widgets[i].setHtml(get_simple_iframe_html(vid), QUrl("https://localhost"))
-            else:
-                self.video_widgets[i].setHtml("")
-
-    def update_parameters(self, tips: list, greeting: str, video_ids: list):
+    def update_text_data(self, tips: list, greeting: str):
         for i in reversed(range(self.tips_layout.count())):
             self.tips_layout.itemAt(i).widget().setParent(None)
         
@@ -409,7 +519,15 @@ class TacTiQOverlay(QWidget):
             self.tips_layout.addWidget(card)
 
         self.add_chat_bubble(greeting, is_user=False)
-        self.load_videos(video_ids)
+        self.load_videos(["", "", ""]) 
+
+    def load_videos(self, video_ids: list):
+        self.current_video_ids = video_ids + [""] * (3 - len(video_ids))
+        for i, vid in enumerate(self.current_video_ids[:3]):
+            if vid:
+                self.video_widgets[i].setHtml(get_simple_iframe_html(vid), QUrl("https://localhost"))
+            else:
+                self.video_widgets[i].setHtml("")
 
     def hide_overlay(self):
         for view in self.video_widgets:
@@ -430,10 +548,9 @@ class TacTiQOverlay(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(10, 10, 15, 190))
 
-
+# ==========================================
 # 5. SIGNAL BRIDGE & CONTROLLER
-
-
+# ==========================================
 class HotkeyBridge(QObject):
     f8_pressed = pyqtSignal()
     f9_pressed = pyqtSignal()
@@ -471,11 +588,15 @@ class AppController(QObject):
 
     def handle_chat_message(self, text):
         if self.chat_worker.isRunning(): return
-        self.toast.show_toast("TacTiQ: Thinking...", duration=2000)
+        
+        # Trigger the iMessage-style animation instead of the toast
+        self.overlay.show_typing_indicator()
         self.chat_worker.message = text
         self.chat_worker.start()
 
     def on_chat_response_received(self, response_text):
+        # Remove the animated dots and place the real response
+        self.overlay.hide_typing_indicator()
         self.overlay.add_chat_bubble(response_text, is_user=False)
 
     def handle_force_hide(self):
@@ -493,12 +614,16 @@ class AppController(QObject):
 
     def take_screenshot_and_analyze(self):
         if self.worker.isRunning(): return 
-        self.toast.show_toast("TacTiQ: Capturing & Analyzing...", duration=None)
+        self.toast.show_toast("", duration=None, is_analyzing=True)
         self.worker.start()
 
-    def on_api_finished(self, tips, greeting, urls):
-        self.overlay.update_parameters(tips, greeting, urls)
+    def on_api_finished(self, tips, greeting, yt_query):
+        self.overlay.update_text_data(tips, greeting)
         self.toast.show_toast("TacTiQ Intel Ready. Press F9.", duration=4000)
+        
+        if not self.yt_worker.isRunning():
+            self.yt_worker.query = yt_query
+            self.yt_worker.start()
 
     def on_api_error(self, error_msg):
         self.toast.show_toast(f"Error: {error_msg}", duration=4000)

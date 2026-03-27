@@ -48,44 +48,39 @@ def clean_gemini_response(text: str) -> str:
 
 def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     context_hint = build_context_hint(game_name)
+    
+    # Let's grab the last few chat messages to pass to the AI so the greeting feels continuous
+    history = load_chat_history(game_name)
+    recent_history = ""
+    for msg in history[-4:]: 
+        role = "Player" if msg["role"] == "user" else "TacTiQ"
+        recent_history += f"{role}: {msg['text']}\n"
+
     print(f"Context hint being sent:\n{context_hint}")
+    
     prompt = f"""
     <role>
-    You are an expert on {game_name} with complete knowledge of its story, characters, locations, missions, and progression.
+    You are TacTiQ, an elite AI gaming companion expert in {game_name}.
     Do NOT just describe what you visually see — use your knowledge to identify exactly what is happening.
     </role>
 
     <context>
         Game: {game_name}
         {context_hint}
-
-        CRITICAL INSTRUCTION: If previous analyses show a later game stage than what 
-        you might visually guess, you MUST trust the session history over visual cues.
+        
+        [RECENT CHAT HISTORY]
+        {recent_history}
     </context>
+    
     <instructions>
     Analyze the following carefully:
-    - Character identity: cross-reference appearance against ALL characters in {game_name} — do not default to the main protagonist
-    - Specific named location using landmarks, environment, and minimap
-    - Story progression: use character identity, location, minimap markers, gear quality, HUD upgrades, and world state to estimate story position
-    - Current mission: identify by name if possible using visible objectives, minimap markers, and situational context
-    - Minimap markers: waypoints, custom markers, path lines and what they suggest the player is navigating toward
-    - Player intent: most likely reason this player is in this area based on location, waypoint direction, equipped items, and game knowledge
-    - Environmental mismatch: is the player's outfit or equipment appropriate for this environment
-    - Cross-reference your character and stage guess against ALL visible HUD elements —
-      . If HUD state contradicts your guess, revise it
+    - Character identity, location, progression, mission, minimap, and player intent.
+    - IMPORTANT: You must generate a "chat_greeting". This should be a natural, conversational 1-2 sentence greeting speaking directly to the player (e.g., "Looks like you're facing..."). Use the RECENT CHAT HISTORY to ensure you don't repeat yourself if the player is in the same area.
     </instructions>
 
     <search_query_rules>
-    You MUST follow these rules strictly when generating youtube_search.
-    This field is the MOST IMPORTANT field in the output.
-
-    RULE 1: Never generate a generic query like "{game_name} guide" or "{game_name} tutorial". This is strictly forbidden.
-    RULE 2: Always use the most specific information available from the screenshot.
-    RULE 3: Follow this priority strictly:
-    - Active mission name visible → "{game_name} [mission name] guide"
-    - Combat/boss fight → "{game_name} [enemy/boss name] fight strategy"
-    - Known location + free roam → "{game_name} [specific location] tips secrets"
-    - Game stage only → "{game_name} [chapter/stage] walkthrough guide"
+    RULE 1: Never generate a generic query like "{game_name} guide".
+    RULE 2: Use the most specific info visible (boss name > active mission > location).
     </search_query_rules>
 
     <output_format>
@@ -93,26 +88,24 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
         "game_name": "{game_name}",
         "character": "playable character name and one-line identification reason",
         "current_area": "specific named location or region",
-        "player_intent": [
-        "most likely reason player is in this area (high/medium/low confidence)"
-    ],
-    "progression": {{
-        "game_stage": "early/mid/late game or specific chapter/act",
-        "current_mission": "active mission name if visible, otherwise null",
-        "next_objective": "what the player should do next",
-        "confidence": "high/medium/low"
-    }},
-    "situation": "one sentence describing what is currently happening",
-    "likely_stuck_on": "one sentence describing the most likely struggle",
-    "player_attributes": "player build type, playstyle, or class if applicable to {game_name} — null if not relevant for {game_name}",
-    "contextual_warning": "immediate threat or issue player may not have noticed — null if nothing noteworthy",
-    "youtube_search": "specific query using location/mission/enemy from screenshot — NEVER generic",
-    "tips": "3 concise, pro-level tips for this specific {game_name} area, boss, or mechanic seen on screen. Focus on secrets, weaknesses, or efficient strategies."
+        "player_intent": ["reason 1", "reason 2"],
+        "progression": {{
+            "game_stage": "early/mid/late game",
+            "current_mission": "active mission name",
+            "next_objective": "what to do next",
+            "confidence": "high/medium/low"
+        }},
+        "situation": "one sentence description",
+        "likely_stuck_on": "one sentence struggle",
+        "player_attributes": "player build type",
+        "youtube_search": "specific query using location/mission/enemy",
+        "tips": ["tip 1", "tip 2", "tip 3"],
+        "chat_greeting": f"Friendly 1-2 sentence conversational opener addressing their current situation for {game_name}."
     }}
     </output_format>
 
     <important>
-    Return raw JSON only. No markdown. No code blocks. No backticks. No extra text.
+    Return raw JSON only. No markdown. No code blocks. No extra text.
     </important>
     """
     buffer = io.BytesIO()
@@ -121,7 +114,7 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
     img_clean = Image.open(buffer)
     
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-3.1-flash-lite-preview",
         contents=[prompt, img_clean]
     )
     
@@ -129,30 +122,28 @@ def analyze_screenshot(img: Image.Image, game_name: str) -> dict:
         cleaned = clean_gemini_response(response.text)
         result = json.loads(cleaned)
         update_session_context(game_name, result) 
+        
+        # Save the dynamically generated greeting directly into our chat history
+        greeting = result.get("chat_greeting", f"Scan complete. How can I assist you with {game_name}?")
+        history.append({"role": "model", "text": greeting})
+        save_chat_history(game_name, history)
+        
         return result
     except json.JSONDecodeError:
-        print("Gemini returned invalid JSON, raw response:")
-        print(response.text)
-        return {"game_name": game_name, "current_area": "Unknown", "situation": "Analysis failed", "likely_stuck_on": "Unknown", "youtube_search": f"{game_name} guide"}
+        print("Gemini returned invalid JSON, raw response:\n", response.text)
+        return {"game_name": game_name, "current_area": "Unknown", "situation": "Analysis failed", "likely_stuck_on": "Unknown", "youtube_search": f"{game_name} guide", "chat_greeting": "Sorry, my scan glitched. What do you need help with?"}
     except Exception as e:
         if "429" in str(e):
-            wait = 30
-            print(f"Rate limited. Waiting {wait}s...")
-            time.sleep(wait)
+            print("Rate limited. We hit a 429 error.")
+            # We don't sleep anymore. We just return a polite failure so the UI doesn't freeze.
+            return {"game_name": game_name, "chat_greeting": "I'm receiving too many requests right now. Give me a few seconds to cool down!", "youtube_search": ""}
         else:
             raise e
 
 def summarize_analysis(analysis: dict) -> str:
     area = analysis.get("current_area", "Unknown location")
     character = analysis.get("character", "Unknown").split(".")[0]
-    situation = analysis.get("situation", "").split(".")[0]
     stuck_on = analysis.get("likely_stuck_on", "").split(".")[0]
-    build = str(analysis.get("player_attributes", "")).split(".")[0]
-    progression = analysis.get("progression", {})
-    stage = progression.get("game_stage", "Unknown")
-    current_mission = progression.get("current_mission", "Unknown")
-    next_obj = progression.get("next_objective", "Unknown")
-    confidence = progression.get("confidence", "low")
     tips_data = analysis.get("tips", [])
 
     if isinstance(tips_data, list):
@@ -160,72 +151,7 @@ def summarize_analysis(analysis: dict) -> str:
     else:
         tips = f"• {tips_data}"
 
-    summary = f"""--- Analysis Report ---
-Location: {area}
-Character: {character}
-Stage: {stage}
-Mission: {current_mission} (Confidence: {confidence})
-Next: {next_obj}
-Build: {build}
-
-Situation: {situation}
-Likely Issue: {stuck_on}
-
-💡 PRO TIPS:
-{tips}
-----------------------"""
-    return summary
-
-def generate_chat_greeting(game_name: str, analysis: dict) -> str:
-    """Generates a context-aware 1-2 sentence greeting for the frontend chat UI."""
-    area = analysis.get("current_area", "Unknown location")
-    character = analysis.get("character", "Unknown").split(",")[0].strip()
-    stuck_on = analysis.get("likely_stuck_on", "this section").split(".")[0].strip()
-
-    # Load recent history to prevent the AI from repeating itself on consecutive F8 scans
-    history = load_chat_history(game_name)
-    recent_history = ""
-    for msg in history[-4:]: 
-        role = "Player" if msg["role"] == "user" else "TacTiQ"
-        recent_history += f"{role}: {msg['text']}\n"
-
-    prompt = f"""
-    You are TacTiQ, an elite, friendly AI gaming companion expert in {game_name}.
-    The player just pressed a hotkey to run a visual scan of their live game. 
-    
-    [CURRENT SCREEN DATA]
-    Location: {area}
-    Character/Enemy: {character}
-    Likely struggling with: {stuck_on}
-    
-    [RECENT CHAT HISTORY]
-    {recent_history}
-    
-    TASK: Write a natural, conversational 1-2 sentence greeting based on the current screen data.
-    
-    CRITICAL RULE: Look at the RECENT CHAT HISTORY. If the player is in the EXACT SAME situation as the last scan (e.g. still fighting the same boss), DO NOT repeat the same greeting. Acknowledge that they are STILL fighting them, and offer a completely different tactical angle or words of encouragement.
-    
-    RULES:
-    - Do NOT use markdown, bolding, or bullet points.
-    - Speak directly to the player (e.g., "Looks like you're still facing...").
-    - Be brief, supportive, and highly tactical.
-    """
-
-    try:
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=prompt
-        )
-        greeting = response.text.strip()
-        
-        # Save greeting to memory
-        history.append({"role": "model", "text": greeting})
-        save_chat_history(game_name, history)
-        return greeting
-        
-    except Exception as e:
-        print(f"Greeting Generation Error: {e}")
-        return f"Scan complete. Looks like you are in {area}. How can I assist you with {game_name}?"
+    return f"--- Analysis Report ---\nLocation: {area}\nCharacter: {character}\nIssue: {stuck_on}\n\n💡 PRO TIPS:\n{tips}\n----------------------"
 
 def save_session_entry(game_name: str, entry: dict):
     os.makedirs(SESSION_DIR, exist_ok=True)
@@ -275,7 +201,7 @@ def load_chat_history(game_name: str) -> list:
 def save_chat_history(game_name: str, history: list):
     os.makedirs(SESSION_DIR, exist_ok=True)
     file_path = f"{SESSION_DIR}/{game_name}_chat.json"
-    history = history[-10:] # Keep last 10 messages
+    history = history[-10:] 
     with open(file_path, "w") as f:
         json.dump(history, f, indent=4)
 
@@ -287,12 +213,20 @@ def chat_with_tactiq(game_name: str, user_message: str) -> str:
     if state:
         context_str = f"Character: {state.get('character', 'Unknown')}, Location: {state.get('last_area', 'Unknown')}, Build: {state.get('current_build', 'Unknown')}"
 
-    prompt = f"You are TacTiQ, an elite AI gaming assistant expert in {game_name}.\n"
-    prompt += f"You are chatting directly with the player. Be concise, highly tactical, and helpful. Limit responses to 2-3 short sentences. No markdown formatting.\n\n"
-    prompt += f"[CURRENT GAME STATE MEMORY]\n{context_str}\n\n"
-    
-    prompt += "[CHAT HISTORY]\n"
-    for msg in history:
+    # --- HYPER-OPTIMIZED PROMPT ---
+    prompt = f"""You are TacTiQ, an elite AI gaming companion for {game_name}.
+
+CRITICAL RULES:
+1. THE GREETING FAST-TRACK: If the player just says "hi", "hello", "ssup", or "?", reply IMMEDIATELY with a short 1-sentence greeting. Do NOT analyze the game state. Just say hi back and ask what they need. (e.g., "Hey , still surviving? What do you need?")
+2. TACTICAL SUPPORT: If they ask a specific question, use the [GAME STATE] to give 1-3 sentences of pro-level advice.
+3. Speak directly to the player. No markdown or bullet points.
+
+[GAME STATE]
+{context_str}
+
+[CHAT HISTORY]
+"""
+    for msg in history[-6:]:
         role = "Player" if msg["role"] == "user" else "TacTiQ"
         prompt += f"{role}: {msg['text']}\n"
     
@@ -300,7 +234,7 @@ def chat_with_tactiq(game_name: str, user_message: str) -> str:
 
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-3-flash-preview", 
             contents=prompt
         )
         ai_response = response.text.strip()
