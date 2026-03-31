@@ -184,9 +184,9 @@ def load_session_history(game_name: str) -> dict:
     with open(file_path, "r") as f:
         return json.load(f)
 
-# =========================================================
+ 
 # CHATBOT MEMORY & COMMUNICATION
-# =========================================================
+ 
 def load_chat_history(game_name: str) -> list:
     os.makedirs(SESSION_DIR, exist_ok=True)
     file_path = f"{SESSION_DIR}/{game_name}_chat.json"
