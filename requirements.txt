@@ -5,4 +5,4 @@ psutil
 google-genai
 python-dotenv 
 google-api-python-client
-PyQt6
+PyQt6-WebEngine
